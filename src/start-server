@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+from logger import get_logger
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="start-server",
+        description="Start the file transfer server.",
+        formatter_class=lambda prog: argparse.HelpFormatter(
+            prog,
+            width=120,
+            max_help_position=50,
+        ),
+    )
+
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-v", "--verbose", action="store_true", help="increase output verbosity"
+    )
+    verbosity.add_argument(
+        "-q", "--quiet", action="store_true", help="decrease output verbosity"
+    )
+
+    parser.add_argument(
+        "-H",
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        metavar="<addr>",
+        help="service IP address",
+    )
+    parser.add_argument(
+        "-p", "--port", type=int, default=8080, metavar="<port>", help="service port"
+    )
+    parser.add_argument(
+        "-s",
+        "--storage",
+        type=str,
+        default="./storage",
+        metavar="<path>",
+        help="storage dir path",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    logger = get_logger("start-server", args.verbose, args.quiet)
+
+    logger.debug(f"Host: {args.host}, Port: {args.port}")
+    logger.debug(f"Storage dir: {args.storage}")
+    logger.info(f"Server starting on {args.host}:{args.port}")
+    logger.info(f"Storage directory: {args.storage}")
+
+    # TODO: implementar lógica del servidor
+
+
+if __name__ == "__main__":
+    main()
