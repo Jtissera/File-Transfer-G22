@@ -61,7 +61,7 @@ def compute_checksum(data: bytes) -> int:
 
 
 def build_packet(
-    msg_type: int, seq_number: int, ack_number: int, payload: bytes = b""
+    msg_type: int, seq_number: int = 0, ack_number: int = 0, payload: bytes = b""
 ) -> bytes:
     """
     Crea el paquete listo para ser enviado.
