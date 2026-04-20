@@ -16,6 +16,14 @@ MSG_DATA = 0x03  # fragmento del archivo
 MSG_ACK = 0x04  # confirma secuencia
 MSG_ERROR = 0x05  # notificación de error
 
+# Protocolos de transferencia
+PROTO_SW  = 0x01  # Stop & Wait
+PROTO_GBN = 0x02  # Go-Back-N
+
+# Configuración por defecto
+DEFAULT_TIMEOUT = 0.5  # timeout en segundos para esperar ACK/DATA
+MAX_RETRIES = 30  # maximo de reintentos antes de abortar
+
 MSG_NAMES = {
     MSG_UPLOAD_REQ: "UPLOAD_REQ",
     MSG_DOWNLOAD_REQ: "DOWNLOAD_REQ",
@@ -23,6 +31,7 @@ MSG_NAMES = {
     MSG_ACK: "ACK",
     MSG_ERROR: "ERROR",
 }
+
 
 
 # Header format:
@@ -61,7 +70,7 @@ def compute_checksum(data: bytes) -> int:
 
 
 def build_packet(
-    msg_type: int, seq_number: int, ack_number: int, payload: bytes = b""
+    msg_type: int, seq_number: int = 0, ack_number: int = 0, payload: bytes = b""
 ) -> bytes:
     """
     Crea el paquete listo para ser enviado.
@@ -137,14 +146,14 @@ def parse_packet(raw: bytes) -> dict:
 # Flujo de carga
 #
 # El cliente envía UPLOAD_REQ con el nombre de archivo + tamaño de archivo en el payload.
-# El servidor responde con ACK(0) para confirmar que está listo.
+# El servidor responde con ACK(0) con el puerto de transferencia para confirmar que está listo.
 # El cliente envía DATA hasta que se envían todos los bytes.
 # El servidor envía ACK(N) después de cada paquete DATA que acepta.
 # El servidor sabe que la transferencia se ha completado cuando los bytes recibidos == tamaño del archivo.
 # ---------------------------------------------------------------------------
 
 
-def build_upload_req(filename: str, filesize: int) -> bytes:
+def build_upload_req(filename: str, filesize: int, proto: int) -> bytes:
     """
     Crea un paquete UPLOAD_REQ.
     En el payload se incluyen 2 bytes para el largo del nombre de archivo,
@@ -153,7 +162,7 @@ def build_upload_req(filename: str, filesize: int) -> bytes:
     """
     name_bytes = filename.encode("utf-8")
     payload = (
-        struct.pack("!H", len(name_bytes)) + name_bytes + struct.pack("!I", filesize)
+        struct.pack("!H", len(name_bytes)) + name_bytes + struct.pack("!I", filesize) + struct.pack("!B", proto)
     )
     return build_packet(MSG_UPLOAD_REQ, payload=payload)
 
@@ -161,63 +170,49 @@ def build_upload_req(filename: str, filesize: int) -> bytes:
 def parse_upload_req(payload: bytes) -> tuple:
     """
     Desempaqueta el payload de un paquete UPLOAD_REQ.
-    Devuelve una tupla (filename: str, filesize: int).
+    Devuelve una tupla (filename: str, filesize: int, proto: int).
     """
     name_len = struct.unpack("!H", payload[:2])[0]
     filename = payload[2 : 2 + name_len].decode("utf-8")
-    filesize = struct.unpack("!I", payload[2 + name_len : 2 + name_len + 4])[0]
-    return filename, filesize
+    offset = 2 + name_len
+    filesize = struct.unpack("!I", payload[offset : offset + 4])[0]
+    proto = struct.unpack("!B", payload[offset + 4 : offset + 5])[0]
+
+    return filename, filesize, proto
 
 
 # ---------------------------------------------------------------------------
 # Flujo de descarga
 #
 # El cliente envía DOWNLOAD_REQ con el nombre de archivo en el payload.
-# El servidor responde con DATA cuyo payload comienza con el tamaño del archivo
-# (4 bytes) seguido del primer fragmento de datos del archivo.
+# El servidor responde con ACK(0) con el puerto de transferencia y el tamaño
+# del archivo en el payload.
+# El cliente envía DATA hasta que se envían todos los bytes.
+# El servidor envía ACK(N) después de cada paquete DATA que acepta.
 # El cliente sabe que la transferencia se ha completado cuando los bytes recibidos == tamaño del archivo.
 # ---------------------------------------------------------------------------
 
 
-def build_download_req(filename: str) -> bytes:
+def build_download_req(filename: str, proto: int) -> bytes:
     """
     Crea un paquete DOWNLOAD_REQ.
     En el payload se incluyen 2 bytes para el largo del nombre de archivo,
     N bytes para el nombre de archivo (UTF-8).
     """
     name_bytes = filename.encode("utf-8")
-    payload = struct.pack("!H", len(name_bytes)) + name_bytes
+    payload = struct.pack("!H", len(name_bytes)) + name_bytes + struct.pack("!B", proto)
     return build_packet(MSG_DOWNLOAD_REQ, payload=payload)
 
 
-def parse_download_req(payload: bytes) -> str:
+def parse_download_req(payload: bytes) -> tuple:
     """
     Desempaqueta el payload de un paquete DOWNLOAD_REQ.
-    Devuelve el nombre de archivo: str.
+    Devuelve una tupla (filename: str, proto: int).
     """
     name_len = struct.unpack("!H", payload[:2])[0]
-    return payload[2 : 2 + name_len].decode("utf-8")
-
-
-def build_first_data(seq: int, filesize: int, chunk: bytes) -> bytes:
-    """
-    Crea el primer paquete DATA en una respuesta de descarga.
-    En el payload se incluyen:
-
-      4 bytes  -- tamaño del archivo (unsigned int)
-      N bytes  -- primer fragmento de datos del archivo
-    """
-    payload = struct.pack("!I", filesize) + chunk
-    return build_packet(MSG_DATA, seq_number=seq, payload=payload)
-
-
-def parse_first_data(payload: bytes) -> tuple:
-    """
-    Desempaqueta el payload del primer paquete DATA en una respuesta de descarga.
-    Devuelve una tupla (filesize: int, chunk: bytes).
-    """
-    filesize = struct.unpack("!I", payload[:4])[0]
-    return filesize, payload[4:]
+    filename = payload[2 : 2 + name_len].decode("utf-8")
+    proto = struct.unpack("!B", payload[2 + name_len : 2 + name_len + 1])[0]
+    return filename, proto
 
 
 def build_data(seq: int, chunk: bytes) -> bytes:
@@ -234,3 +229,24 @@ def build_error(message: str) -> bytes:
 
 def parse_error(payload: bytes) -> str:
     return payload.decode("utf-8")
+
+
+def build_ack_with_port(ack: int, port: int) -> bytes:
+    """ACK con puerto de transferencia (lo uso en upload)."""
+    payload = struct.pack("!H", port)
+    return build_packet(MSG_ACK, ack_number=ack, payload=payload)
+
+
+def parse_ack_port(payload: bytes) -> int:
+    return struct.unpack("!H", payload[:2])[0]
+
+
+def build_ack_with_port_and_size(ack: int, port: int, filesize: int) -> bytes:
+    """ACK con puerto de transferencia y tamaño de archivo (lo uso en en download)."""
+    payload = struct.pack("!HI", port, filesize)
+    return build_packet(MSG_ACK, ack_number=ack, payload=payload)
+
+
+def parse_ack_port_and_size(payload: bytes) -> tuple:
+    port, filesize = struct.unpack("!HI", payload[:6])
+    return port, filesize

@@ -2,9 +2,93 @@
 import argparse
 import sys
 import os
+import threading
+import socket
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from logger import get_logger
+import stop_and_wait as sw
+import go_back_n as gbn
+
+from protocol import (
+    parse_packet,
+    parse_upload_req,
+    parse_download_req,
+    build_error,
+    MSG_UPLOAD_REQ,
+    MSG_DOWNLOAD_REQ,
+    MAX_PACKET_SIZE,
+    build_ack_with_port,
+    build_ack_with_port_and_size,
+    PROTO_SW,
+    PROTO_GBN,
+)
+
+
+def get_transfer_funcs(proto: int):
+    if proto == PROTO_GBN:
+        return gbn.send, gbn.receive
+    return sw.send, sw.receive
+
+
+def handle_upload(client_addr, filename, filesize, storage_dir, logger, proto):
+    transfer_send, transfer_receive = get_transfer_funcs(proto)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", 0))  # te lo da el so
+    _, client_port = s.getsockname()
+
+    s.sendto(build_ack_with_port(0, client_port), client_addr)
+    logger.info(f'Recibiendo "{filename}" ({filesize} bytes) en puerto {client_port} [{proto=}]')
+
+    try:
+        data, _ = transfer_receive(s, filesize, first_seq=1, logger=logger)
+        filepath = os.path.join(storage_dir, filename)
+
+        with open(filepath, "wb") as f:
+            f.write(data)
+
+        logger.info(f'Upload "{filename}" completado ({len(data)} bytes)')
+
+    except Exception as e:
+        logger.error(f'Error en upload de "{filename}": {e}')
+
+    finally:
+        s.close()
+
+
+def handle_download(client_addr, filename, storage_dir, logger, proto):
+    transfer_send, transfer_receive = get_transfer_funcs(proto)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", 0))
+    _, client_port = s.getsockname()
+
+    filepath = os.path.join(storage_dir, filename)
+
+    if not os.path.exists(filepath):
+        logger.error(f'Archivo no encontrado: "{filename}"')
+        s.sendto(build_error("archivo no encontrado"), client_addr)
+        s.close()
+        return
+
+    filesize = os.path.getsize(filepath)
+    s.sendto(build_ack_with_port_and_size(0, client_port, filesize), client_addr)
+    logger.info(f'Enviando "{filename}" ({filesize} bytes) en puerto {client_port} [{proto=}]')
+
+    try:
+        with open(filepath, "rb") as f:
+            file_data = f.read()
+
+        transfer_send(s, client_addr, file_data, first_seq=1, logger=logger)
+
+        logger.info(f'Download "{filename}" completado')
+
+    except Exception as e:
+        logger.error(f'Error en download de "{filename}": {e}')
+
+    finally:
+        s.close()
 
 
 def parse_args():
@@ -58,7 +142,48 @@ def main():
     logger.info(f"Server starting on {args.host}:{args.port}")
     logger.info(f"Storage directory: {args.storage}")
 
-    # TODO: implementar lógica del servidor
+    os.makedirs(args.storage, exist_ok=True)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((args.host, args.port))
+
+    while True:
+        try:
+            data, client_addr = sock.recvfrom(MAX_PACKET_SIZE)
+        except Exception as e:
+            logger.error(f"Error recibiendo paquete: {e}")
+            continue
+
+        try:
+            packet = parse_packet(data)
+        except Exception as e:
+            logger.error(f"Paquete malformado de {client_addr}: {e}")
+            sock.sendto(build_error("paquete malformado"), client_addr)
+            continue
+
+        if packet["type"] == MSG_UPLOAD_REQ:
+            filename, filesize, proto = parse_upload_req(packet["payload"])
+
+            clientThread = threading.Thread(
+                target=handle_upload,
+                args=(client_addr, filename, filesize, args.storage, logger, proto),
+                daemon=True,
+            )
+            clientThread.start()
+
+        elif packet["type"] == MSG_DOWNLOAD_REQ:
+            filename, proto = parse_download_req(packet["payload"])
+
+            clientThread = threading.Thread(
+                target=handle_download,
+                args=(client_addr, filename, args.storage, logger, proto),
+                daemon=True,
+            )
+            clientThread.start()
+
+        else:
+            logger.error(f"Tipo de paquete no reconocido de {client_addr}: {packet['type_name']}")
+            sock.sendto(build_error("tipo de paquete no reconocido"), client_addr)
 
 
 if __name__ == "__main__":

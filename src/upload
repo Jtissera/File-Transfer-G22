@@ -2,9 +2,24 @@
 import argparse
 import sys
 import os
+import socket
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from logger import get_logger
+
+from protocol import (
+    build_upload_req,
+    parse_packet,
+    parse_error,
+    parse_ack_port,
+    MSG_ACK,
+    MSG_ERROR,
+    MAX_PACKET_SIZE,
+    PROTO_SW,
+    PROTO_GBN,
+    DEFAULT_TIMEOUT,
+    MAX_RETRIES,
+)
 
 
 def parse_args():
@@ -73,8 +88,72 @@ def main():
     logger.debug(f"Protocol: {args.protocol}")
     logger.info(f'Starting upload of "{args.src}" -> "{args.name}"')
 
-    # TODO: implementar lógica de upload
+    if not os.path.exists(args.src):
+        logger.error(f'Archivo no encontrado: "{args.src}"')
+        return
+
+    filesize = os.path.getsize(args.src)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    if args.protocol == "gbn":
+        proto_id = PROTO_GBN
+        import go_back_n as proto
+    else:
+        proto_id = PROTO_SW
+        import stop_and_wait as proto
+
+    server_addr = (args.host, args.port)
+    transfer_port = None
+    retries = 0
+
+    while transfer_port is None:
+        if retries >= MAX_RETRIES:
+            logger.error("No se pudo establecer conexión con el servidor")
+            sock.close()
+            return
+
+        sock.sendto(build_upload_req(args.name, filesize, proto_id), server_addr)
+
+        try:
+            sock.settimeout(DEFAULT_TIMEOUT)
+            data, _ = sock.recvfrom(MAX_PACKET_SIZE)
+            packet = parse_packet(data)
+
+            if packet["type"] == MSG_ERROR:
+                logger.error(f"Error del servidor: {parse_error(packet['payload'])}")
+                sock.close()
+                return
+
+            if packet["type"] == MSG_ACK and packet["ack_number"] == 0:
+                transfer_port = parse_ack_port(packet["payload"])
+            else:
+                logger.debug("Respuesta inesperada del servidor, reintentando")
+                retries += 1
+
+        except socket.timeout:
+            retries += 1
+            logger.debug(f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}")
+
+    transfer_addr = (args.host, transfer_port)
+
+    logger.debug(f"Servidor listo en puerto {transfer_port}, enviando datos")
+
+    with open(args.src, "rb") as f:
+        file_data = f.read()
+ 
+    try:
+        proto.send(sock, transfer_addr, file_data, first_seq=1, logger=logger)
+    
+    except proto.TransferError as e:
+        logger.error(f"Error en la transferencia: {e}")
+        sock.close()
+        return
+
+    logger.info(f'Upload de "{args.name}" completado')
+    sock.close()
 
 
 if __name__ == "__main__":
     main()
+

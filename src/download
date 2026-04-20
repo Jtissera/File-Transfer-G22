@@ -2,9 +2,24 @@
 import argparse
 import sys
 import os
+import socket
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from logger import get_logger
+
+from protocol import (
+    build_download_req,
+    parse_packet,
+    parse_error,
+    parse_ack_port_and_size,
+    MSG_ACK,
+    MSG_ERROR,
+    MAX_PACKET_SIZE,
+    PROTO_SW,
+    PROTO_GBN,
+    DEFAULT_TIMEOUT,
+    MAX_RETRIES,
+)
 
 
 def parse_args():
@@ -75,7 +90,67 @@ def main():
     logger.debug(f"Protocol: {args.protocol}")
     logger.info(f'Starting download of "{args.name}" -> "{args.dst}"')
 
-    # TODO: implementar lógica de download
+
+    if args.protocol == "gbn":
+        proto_id = PROTO_GBN
+        import go_back_n as proto
+    else:
+        proto_id = PROTO_SW
+        import stop_and_wait as proto
+
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_addr = (args.host, args.port)
+
+    transfer_port = None
+    filesize = None
+    retries = 0
+
+    while transfer_port is None:
+        if retries >= MAX_RETRIES:
+            logger.error("No se pudo establecer conexion con el servidor")
+            sock.close()
+            return
+
+        sock.sendto(build_download_req(args.name, proto), server_addr)
+
+        try:
+            sock.settimeout(DEFAULT_TIMEOUT)
+            data, _ = sock.recvfrom(MAX_PACKET_SIZE)
+            packet = parse_packet(data)
+
+            if packet["type"] == MSG_ERROR:
+                logger.error(f"Error del servidor: {parse_error(packet['payload'])}")
+                sock.close()
+                return
+
+            if packet["type"] == MSG_ACK and packet["ack_number"] == 0:
+                
+                transfer_port, filesize = parse_ack_port_and_size(packet["payload"])
+            else:
+                logger.debug("Respuesta inesperada del servidor, reintentando")
+                retries += 1
+
+        except socket.timeout:
+            retries += 1
+            logger.debug(f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}")
+
+    logger.debug(f"Servidor listo en puerto {transfer_port}, filesize={filesize} bytes")
+
+    try:
+        file_data, _ = protocol.receive(
+            sock, filesize, first_seq=1, logger=logger
+        )
+    except protocol.TransferError as e:
+        logger.error(f"Error en la transferencia: {e}")
+        sock.close()
+        return
+
+    with open(args.dst, "wb") as f:
+        f.write(file_data)
+
+    logger.info(f'Download de "{args.name}" completado')
+    sock.close()
 
 
 if __name__ == "__main__":
