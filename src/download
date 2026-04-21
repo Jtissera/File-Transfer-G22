@@ -112,7 +112,7 @@ def main():
             sock.close()
             return
 
-        sock.sendto(build_download_req(args.name, proto), server_addr)
+        sock.sendto(build_download_req(args.name, proto_id), server_addr)
 
         try:
             sock.settimeout(DEFAULT_TIMEOUT)
@@ -138,10 +138,10 @@ def main():
     logger.debug(f"Servidor listo en puerto {transfer_port}, filesize={filesize} bytes")
 
     try:
-        file_data, _ = protocol.receive(
+        file_data, _ = proto.receive(
             sock, filesize, first_seq=1, logger=logger
         )
-    except protocol.TransferError as e:
+    except proto.TransferError as e:
         logger.error(f"Error en la transferencia: {e}")
         sock.close()
         return

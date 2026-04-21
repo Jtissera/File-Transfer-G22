@@ -147,6 +147,9 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.host, args.port))
 
+    active_uploads = {}
+    lock = threading.Lock()
+
     while True:
         try:
             data, client_addr = sock.recvfrom(MAX_PACKET_SIZE)
@@ -164,12 +167,53 @@ def main():
         if packet["type"] == MSG_UPLOAD_REQ:
             filename, filesize, proto = parse_upload_req(packet["payload"])
 
-            clientThread = threading.Thread(
-                target=handle_upload,
-                args=(client_addr, filename, filesize, args.storage, logger, proto),
-                daemon=True,
-            )
-            clientThread.start()
+            key = (client_addr, filename, filesize, proto)
+
+            with lock:
+                if key in active_uploads:
+                    transfer_port = active_uploads[key]
+                    sock.sendto(build_ack_with_port(0, transfer_port), client_addr)
+
+                    logger.debug(
+                        f"UPLOAD duplicado de {client_addr} para '{filename}', "
+                        f"reenviando puerto {transfer_port}"
+                    )
+                    continue
+
+            def upload_wrapper():
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.bind(("0.0.0.0", 0))
+                _, client_port = s.getsockname()
+
+                with lock:
+                    active_uploads[key] = client_port
+
+                s.sendto(build_ack_with_port(0, client_port), client_addr)
+
+                logger.info(
+                    f'Recibiendo "{filename}" ({filesize} bytes) en puerto {client_port} [{proto=}]'
+                )
+
+                try:
+                    transfer_send, transfer_receive = get_transfer_funcs(proto)
+
+                    data, _ = transfer_receive(s, filesize, first_seq=1, logger=logger)
+
+                    filepath = os.path.join(args.storage, filename)
+                    with open(filepath, "wb") as f:
+                        f.write(data)
+
+                    logger.info(f'Upload "{filename}" completado ({len(data)} bytes)')
+
+                except Exception as e:
+                    logger.error(f'Error en upload de "{filename}": {e}')
+
+                finally:
+                    with lock:
+                        active_uploads.pop(key, None)
+                    s.close()
+
+            threading.Thread(target=upload_wrapper, daemon=True).start()
 
         elif packet["type"] == MSG_DOWNLOAD_REQ:
             filename, proto = parse_download_req(packet["payload"])
