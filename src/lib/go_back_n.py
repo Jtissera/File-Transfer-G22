@@ -169,3 +169,134 @@ def send(
         logger.info(f"[GBN] Transferencia completada: {total_bytes} bytes enviados")
 
     return first_seq + total_packets
+
+def receive(
+    sock,
+    expected_bytes,
+    first_seq=0,
+    logger=None,
+    timeout=DEFAULT_TIMEOUT,
+    max_retries=MAX_RETRIES,
+):
+    """
+    Recibe datos de forma confiable usando Go-Back-N.
+
+    Acepta únicamente el siguiente número de secuencia esperado. Cuando llega
+    un paquete fuera de orden, lo descarta y reenvía el último ACK válido.
+    """
+    data = bytearray()
+    expected_seq = first_seq
+    sender_addr = None
+    consecutive_timeouts = 0
+    last_ack_sent = first_seq - 1
+
+    while len(data) < expected_bytes:
+        try:
+            sock.settimeout(timeout)
+            raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
+            consecutive_timeouts = 0
+
+        except _socket.timeout:
+            consecutive_timeouts += 1
+            if consecutive_timeouts >= max_retries:
+                raise TransferError(
+                    f"Se superaron {max_retries} timeouts consecutivos "
+                    f"esperando seq={expected_seq}"
+                )
+            if logger:
+                logger.debug(
+                    f"[GBN] Timeout esperando seq={expected_seq} "
+                    f"({consecutive_timeouts}/{max_retries})"
+                )
+            continue
+
+        try:
+            pkt = parse_packet(raw)
+        except ValueError as e:
+            if logger:
+                logger.debug(f"[GBN] Paquete corrupto descartado: {e}")
+            continue
+
+        if sender_addr is not None and addr != sender_addr:
+            if logger:
+                logger.debug(f"[GBN] Paquete de {addr} ignorado (esperaba {sender_addr})")
+            continue
+
+        if pkt["type"] == MSG_ERROR:
+            error_msg = pkt["payload"].decode("utf-8", errors="replace")
+            raise TransferError(f"Error del emisor: {error_msg}")
+
+        if pkt["type"] != MSG_DATA:
+            if logger:
+                logger.debug(f"[GBN] Esperaba DATA, recibido {pkt['type_name']}")
+            continue
+
+        if sender_addr is None:
+            sender_addr = addr
+
+        seq = pkt["seq_number"]
+
+        if seq == expected_seq:
+            remaining = expected_bytes - len(data)
+            payload = pkt["payload"][:remaining]
+            data.extend(payload)
+
+            ack = build_ack(seq)
+            sock.sendto(ack, addr)
+            last_ack_sent = seq
+
+            if logger:
+                logger.debug(
+                    f"[GBN] Recibido DATA seq={seq} "
+                    f"({len(data)}/{expected_bytes} bytes), ACK acumulativo enviado"
+                )
+
+            expected_seq += 1
+
+        else:
+            if last_ack_sent >= first_seq:
+                ack = build_ack(last_ack_sent)
+                sock.sendto(ack, addr)
+                if logger:
+                    logger.debug(
+                        f"[GBN] DATA fuera de orden/duplicado seq={seq}, "
+                        f"esperaba {expected_seq}; reenviado ACK={last_ack_sent}"
+                    )
+            else:
+                if logger:
+                    logger.debug(
+                        f"[GBN] DATA fuera de orden seq={seq}, "
+                        f"esperaba {expected_seq}; aún no hay ACK válido para reenviar"
+                    )
+
+    if logger:
+        logger.info(f"[GBN] Recepción completada: {len(data)} bytes recibidos")
+
+    final_ack_retries = 5
+    while final_ack_retries > 0 and sender_addr is not None and last_ack_sent >= first_seq:
+        try:
+            sock.settimeout(timeout)
+            raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
+
+            if addr != sender_addr:
+                continue
+
+            try:
+                pkt = parse_packet(raw)
+            except ValueError:
+                continue
+
+            if pkt["type"] == MSG_DATA:
+                ack = build_ack(last_ack_sent)
+                sock.sendto(ack, addr)
+
+                if logger:
+                    logger.debug(
+                        f"[GBN] Linger: duplicado/fuera de orden seq={pkt['seq_number']}, "
+                        f"reenviado ACK={last_ack_sent}"
+                    )
+
+        except _socket.timeout:
+            final_ack_retries -= 1
+
+    return bytes(data), sender_addr
