@@ -12,9 +12,18 @@ Funcionamiento:
   4. Si hay timeout, reenvía el mismo paquete (hasta max_retries veces)
   5. El receiver envía ACK al recibir cada DATA con el seq esperado
   6. Si recibe un DATA duplicado (seq < esperado), reenvía el ACK correspondiente
+
+  Aclaracion:
+  El rtt solo se actualiza en caso de que no haya ocurrido una retransmicion ya que si
+  ocurre un timeout y se reenvia, cuando llegue el ACK no tengo ni idea de si le pertenece
+  al paquete original (solo tardo un poco mas) o si es del retransmitido => no sabes que sample_rtt
+  deberias pasarle.
 """
 
 import socket as _socket
+import time
+
+from rtt import *
 
 from protocol import (
     build_data,
@@ -49,7 +58,7 @@ def send(
     data,
     first_seq=0,
     logger=None,
-    timeout=DEFAULT_TIMEOUT,
+    initial_rtt = None,
     max_retries=MAX_RETRIES,
 ):
     """
@@ -77,12 +86,18 @@ def send(
     offset = 0
     seq = first_seq
 
+    if initial_rtt == None:
+        rtt = rtt_new()
+    else:
+        rtt = initial_rtt
+
     while offset < total:
         chunk = data[offset : offset + MAX_PAYLOAD_SIZE]
         packet = build_data(seq, chunk)
 
         ack_received = False
         retries = 0
+        rtt_pkt = dict(rtt)
 
         while not ack_received:
             if retries >= max_retries:
@@ -92,6 +107,7 @@ def send(
 
             # Enviar paquete DATA
             sock.sendto(packet, addr)
+            send_time = time.time() # tiempo actual en seg
             if logger:
                 logger.debug(
                     f"[S&W] Enviado DATA seq={seq} "
@@ -100,12 +116,14 @@ def send(
 
             # Esperar ACK
             try:
-                sock.settimeout(timeout)
+                sock.settimeout(rtt_timeout(rtt_pkt))
                 raw, _recv_addr = sock.recvfrom(MAX_PACKET_SIZE)
                 pkt = parse_packet(raw)
 
                 if pkt["type"] == MSG_ACK and pkt["ack_number"] == seq:
                     ack_received = True
+                    if retries == 0:
+                        rtt = rtt_update(rtt, time.time() - send_time) # La resta es a lo que refiere la aclaracion del incio
                     if logger:
                         logger.debug(f"[S&W] Recibido ACK ack={seq}")
 
@@ -124,6 +142,7 @@ def send(
 
             except _socket.timeout:
                 retries += 1
+                rtt_pkt = rtt_duplicate(rtt_pkt)
                 if logger:
                     logger.debug(
                         f"[S&W] Timeout seq={seq}, "
@@ -155,7 +174,6 @@ def receive(
     expected_bytes,
     first_seq=0,
     logger=None,
-    timeout=DEFAULT_TIMEOUT,
     max_retries=MAX_RETRIES,
 ):
     """
@@ -181,28 +199,11 @@ def receive(
     data = bytearray()
     expected_seq = first_seq
     sender_addr = None
-    consecutive_timeouts = 0
 
     while len(data) < expected_bytes:
-        # Esperar paquete DATA
-        try:
-            sock.settimeout(timeout)
-            raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
-            consecutive_timeouts = 0  # Reset en cualquier recepción
 
-        except _socket.timeout:
-            consecutive_timeouts += 1
-            if consecutive_timeouts >= max_retries:
-                raise TransferError(
-                    f"Se superaron {max_retries} timeouts consecutivos "
-                    f"esperando seq={expected_seq}"
-                )
-            if logger:
-                logger.debug(
-                    f"[S&W] Timeout esperando seq={expected_seq} "
-                    f"({consecutive_timeouts}/{max_retries})"
-                )
-            continue
+        raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
+
 
         # Validar integridad del paquete
         try:

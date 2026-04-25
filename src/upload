@@ -3,9 +3,12 @@ import argparse
 import sys
 import os
 import socket
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from logger import get_logger
+
+from rtt import *
 
 from protocol import (
     build_upload_req,
@@ -106,6 +109,7 @@ def main():
     server_addr = (args.host, args.port)
     transfer_port = None
     retries = 0
+    rtt = rtt_new()
 
     while transfer_port is None:
         if retries >= MAX_RETRIES:
@@ -114,9 +118,10 @@ def main():
             return
 
         sock.sendto(build_upload_req(args.name, filesize, proto_id), server_addr)
+        send_time = time.time() 
 
         try:
-            sock.settimeout(DEFAULT_TIMEOUT)
+            sock.settimeout(rtt_timeout(rtt))
             data, _ = sock.recvfrom(MAX_PACKET_SIZE)
             packet = parse_packet(data)
 
@@ -126,13 +131,18 @@ def main():
                 return
 
             if packet["type"] == MSG_ACK and packet["ack_number"] == 0:
+                if retries == 0:
+                    rtt = rtt_update(rtt, time.time() - send_time)
+                
                 transfer_port = parse_ack_port(packet["payload"])
             else:
                 logger.debug("Respuesta inesperada del servidor, reintentando")
                 retries += 1
 
+
         except socket.timeout:
             retries += 1
+            rtt = rtt_duplicate(rtt)
             logger.debug(f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}")
 
     transfer_addr = (args.host, transfer_port)
@@ -143,7 +153,7 @@ def main():
         file_data = f.read()
  
     try:
-        proto.send(sock, transfer_addr, file_data, first_seq=1, logger=logger)
+        proto.send(sock, transfer_addr, file_data, first_seq=1, logger=logger, initial_rtt=rtt)
     
     except proto.TransferError as e:
         logger.error(f"Error en la transferencia: {e}")

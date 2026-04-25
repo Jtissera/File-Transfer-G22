@@ -21,8 +21,8 @@ PROTO_SW  = 0x01  # Stop & Wait
 PROTO_GBN = 0x02  # Go-Back-N
 
 # Configuración por defecto
-DEFAULT_TIMEOUT = 0.5  # timeout en segundos para esperar ACK/DATA
-MAX_RETRIES = 30  # maximo de reintentos antes de abortar
+DEFAULT_TIMEOUT = 0.2  # timeout en segundos para evitar que socket quede colgado
+MAX_RETRIES = 100  # maximo de reintentos antes de abortar
 
 MSG_NAMES = {
     MSG_UPLOAD_REQ: "UPLOAD_REQ",
