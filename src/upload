@@ -6,21 +6,29 @@ import socket
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+
 from logger import get_logger
 
-from rtt import *
+from rtt import (
+    rtt_new,
+    rtt_duplicate,
+    rtt_timeout,
+    rtt_update,
+)
 
 from protocol import (
     build_upload_req,
     parse_packet,
     parse_error,
     parse_ack_port,
+)
+
+from constants import (
     MSG_ACK,
     MSG_ERROR,
     MAX_PACKET_SIZE,
-    PROTO_SW,
-    PROTO_GBN,
-    DEFAULT_TIMEOUT,
+    PROTOCOL_SW,
+    PROTOCOL_GBN,
     MAX_RETRIES,
 )
 
@@ -36,7 +44,10 @@ def parse_args():
 
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
-        "-v", "--verbose", action="store_true", help="increase output verbosity"
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="increase output verbosity",
     )
     verbosity.add_argument(
         "-q", "--quiet", action="store_true", help="decrease output verbosity"
@@ -51,7 +62,12 @@ def parse_args():
         help="server IP address",
     )
     parser.add_argument(
-        "-p", "--port", type=int, default=8080, metavar="<port>", help="server port"
+        "-p",
+        "--port",
+        type=int,
+        default=8080,
+        metavar="<port>",
+        help="server port",
     )
     parser.add_argument(
         "-s",
@@ -100,11 +116,11 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     if args.protocol == "gbn":
-        proto_id = PROTO_GBN
-        import go_back_n as proto
+        protocol_id = PROTOCOL_GBN
+        import go_back_n as protocol
     else:
-        proto_id = PROTO_SW
-        import stop_and_wait as proto
+        protocol_id = PROTOCOL_SW
+        import stop_and_wait as protocol
 
     server_addr = (args.host, args.port)
     transfer_port = None
@@ -117,8 +133,10 @@ def main():
             sock.close()
             return
 
-        sock.sendto(build_upload_req(args.name, filesize, proto_id), server_addr)
-        send_time = time.time() 
+        sock.sendto(
+            build_upload_req(args.name, filesize, protocol_id), server_addr
+        )
+        send_time = time.time()
 
         try:
             sock.settimeout(rtt_timeout(rtt))
@@ -126,24 +144,27 @@ def main():
             packet = parse_packet(data)
 
             if packet["type"] == MSG_ERROR:
-                logger.error(f"Error del servidor: {parse_error(packet['payload'])}")
+                logger.error(
+                    f"Error del servidor: {parse_error(packet['payload'])}"
+                )
                 sock.close()
                 return
 
             if packet["type"] == MSG_ACK and packet["ack_number"] == 0:
                 if retries == 0:
                     rtt = rtt_update(rtt, time.time() - send_time)
-                
+
                 transfer_port = parse_ack_port(packet["payload"])
             else:
                 logger.debug("Respuesta inesperada del servidor, reintentando")
                 retries += 1
 
-
         except socket.timeout:
             retries += 1
             rtt = rtt_duplicate(rtt)
-            logger.debug(f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}")
+            logger.debug(
+                f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}"
+            )
 
     transfer_addr = (args.host, transfer_port)
 
@@ -151,11 +172,18 @@ def main():
 
     with open(args.src, "rb") as f:
         file_data = f.read()
- 
+
     try:
-        proto.send(sock, transfer_addr, file_data, first_seq=1, logger=logger, initial_rtt=rtt)
-    
-    except proto.TransferError as e:
+        protocol.send(
+            sock,
+            transfer_addr,
+            file_data,
+            first_seq=1,
+            logger=logger,
+            initial_rtt=rtt,
+        )
+
+    except protocol.TransferError as e:
         logger.error(f"Error en la transferencia: {e}")
         sock.close()
         return
@@ -166,4 +194,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

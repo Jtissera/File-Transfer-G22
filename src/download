@@ -5,21 +5,28 @@ import os
 import socket
 import time
 
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+
 from logger import get_logger
-from rtt import *
+from rtt import (
+    rtt_new,
+    rtt_duplicate,
+    rtt_timeout,
+    rtt_update,
+)
 from protocol import (
     build_download_req,
     parse_packet,
     parse_error,
     parse_ack_port_and_size,
+)
+
+from constants import (
     MSG_ACK,
     MSG_ERROR,
     MAX_PACKET_SIZE,
-    PROTO_SW,
-    PROTO_GBN,
-    DEFAULT_TIMEOUT,
+    PROTOCOL_SW,
+    PROTOCOL_GBN,
     MAX_RETRIES,
 )
 
@@ -37,7 +44,10 @@ def parse_args():
 
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
-        "-v", "--verbose", action="store_true", help="increase output verbosity"
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="increase output verbosity",
     )
     verbosity.add_argument(
         "-q", "--quiet", action="store_true", help="decrease output verbosity"
@@ -52,7 +62,12 @@ def parse_args():
         help="server IP address",
     )
     parser.add_argument(
-        "-p", "--port", type=int, default=8080, metavar="<port>", help="server port"
+        "-p",
+        "--port",
+        type=int,
+        default=8080,
+        metavar="<port>",
+        help="server port",
     )
     parser.add_argument(
         "-d",
@@ -92,14 +107,12 @@ def main():
     logger.debug(f"Protocol: {args.protocol}")
     logger.info(f'Starting download of "{args.name}" -> "{args.dst}"')
 
-
     if args.protocol == "gbn":
-        proto_id = PROTO_GBN
-        import go_back_n as proto
+        protocol_id = PROTOCOL_GBN
+        import go_back_n as protocol
     else:
-        proto_id = PROTO_SW
-        import stop_and_wait as proto
-
+        protocol_id = PROTOCOL_SW
+        import stop_and_wait as protocol
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_addr = (args.host, args.port)
@@ -115,7 +128,7 @@ def main():
             sock.close()
             return
 
-        sock.sendto(build_download_req(args.name, proto_id), server_addr)
+        sock.sendto(build_download_req(args.name, protocol_id), server_addr)
         send_time = time.time()
 
         try:
@@ -124,13 +137,17 @@ def main():
             packet = parse_packet(data)
 
             if packet["type"] == MSG_ERROR:
-                logger.error(f"Error del servidor: {parse_error(packet['payload'])}")
+                logger.error(
+                    f"Error del servidor: {parse_error(packet['payload'])}"
+                )
                 sock.close()
                 return
 
             if packet["type"] == MSG_ACK and packet["ack_number"] == 0:
-                
-                transfer_port, filesize = parse_ack_port_and_size(packet["payload"])
+
+                transfer_port, filesize = parse_ack_port_and_size(
+                    packet["payload"]
+                )
                 if retries == 0:
                     rtt = rtt_update(rtt, time.time() - send_time)
 
@@ -141,21 +158,22 @@ def main():
         except socket.timeout:
             retries += 1
             rtt = rtt_duplicate(rtt)
-            logger.debug(f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}")
+            logger.debug(
+                f"Timeout esperando ACK(0), reintento {retries}/{MAX_RETRIES}"
+            )
 
-    logger.debug(f"Servidor listo en puerto {transfer_port}, filesize={filesize} bytes")
+    logger.debug(
+        f"Servidor listo en puerto {transfer_port}, filesize={filesize} bytes"
+    )
+
+    filepath = os.path.join(args.dst, args.name)
 
     try:
-        file_data, _ = proto.receive(
-            sock, filesize, first_seq=1, logger=logger
-        )
-    except proto.TransferError as e:
+        protocol.receive(sock, filepath, filesize, first_seq=1, logger=logger)
+    except protocol.TransferError as e:
         logger.error(f"Error en la transferencia: {e}")
         sock.close()
         return
-
-    with open(args.dst, "wb") as f:
-        f.write(file_data)
 
     logger.info(f'Download de "{args.name}" completado')
     sock.close()

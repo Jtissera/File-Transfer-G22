@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-import argparse
 import sys
 import os
+import argparse
 import threading
 import socket
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+
 from logger import get_logger
 import stop_and_wait as sw
 import go_back_n as gbn
@@ -15,86 +16,22 @@ from protocol import (
     parse_upload_req,
     parse_download_req,
     build_error,
-    MSG_UPLOAD_REQ,
-    MSG_DOWNLOAD_REQ,
-    MAX_PACKET_SIZE,
     build_ack_with_port,
     build_ack_with_port_and_size,
-    PROTO_SW,
-    PROTO_GBN,
+)
+
+from constants import (
+    MSG_UPLOAD_REQ,
+    MSG_DOWNLOAD_REQ,
+    PROTOCOL_GBN,
+    MAX_PACKET_SIZE,
 )
 
 
 def get_transfer_funcs(proto: int):
-    if proto == PROTO_GBN:
+    if proto == PROTOCOL_GBN:
         return gbn.send, gbn.receive
     return sw.send, sw.receive
-
-
-def handle_upload(client_addr, filename, filesize, storage_dir, logger, proto, lock, active_uploads,key):
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("0.0.0.0", 0))  # te lo da el so
-    _, client_port = s.getsockname()
-
-    with lock:
-        active_uploads[key] = client_port
-
-    s.sendto(build_ack_with_port(0, client_port), client_addr)
-    logger.info(f'Recibiendo "{filename}" ({filesize} bytes) en puerto {client_port} [{proto=}]')
-
-    try:
-        transfer_send, transfer_receive = get_transfer_funcs(proto)
-
-        data, _ = transfer_receive(s, filesize, first_seq=1, logger=logger)
-        filepath = os.path.join(storage_dir, filename)
-
-        with open(filepath, "wb") as f:
-            f.write(data)
-
-        logger.info(f'Upload "{filename}" completado ({len(data)} bytes)')
-
-    except Exception as e:
-        logger.error(f'Error en upload de "{filename}": {e}')
-
-    finally:
-        with lock:
-            active_uploads.pop(key, None)
-        s.close()
-
-
-def handle_download(client_addr, filename, storage_dir, logger, proto):
-    transfer_send, transfer_receive = get_transfer_funcs(proto)
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("0.0.0.0", 0))
-    _, client_port = s.getsockname()
-
-    filepath = os.path.join(storage_dir, filename)
-
-    if not os.path.exists(filepath):
-        logger.error(f'Archivo no encontrado: "{filename}"')
-        s.sendto(build_error("archivo no encontrado"), client_addr)
-        s.close()
-        return
-
-    filesize = os.path.getsize(filepath)
-    s.sendto(build_ack_with_port_and_size(0, client_port, filesize), client_addr)
-    logger.info(f'Enviando "{filename}" ({filesize} bytes) en puerto {client_port} [{proto=}]')
-
-    try:
-        with open(filepath, "rb") as f:
-            file_data = f.read()
-
-        transfer_send(s, client_addr, file_data, first_seq=1, logger=logger)
-
-        logger.info(f'Download "{filename}" completado')
-
-    except Exception as e:
-        logger.error(f'Error en download de "{filename}": {e}')
-
-    finally:
-        s.close()
 
 
 def parse_args():
@@ -110,7 +47,10 @@ def parse_args():
 
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
-        "-v", "--verbose", action="store_true", help="increase output verbosity"
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="increase output verbosity",
     )
     verbosity.add_argument(
         "-q", "--quiet", action="store_true", help="decrease output verbosity"
@@ -125,7 +65,12 @@ def parse_args():
         help="service IP address",
     )
     parser.add_argument(
-        "-p", "--port", type=int, default=8080, metavar="<port>", help="service port"
+        "-p",
+        "--port",
+        type=int,
+        default=8080,
+        metavar="<port>",
+        help="service port",
     )
     parser.add_argument(
         "-s",
@@ -137,6 +82,111 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def handle_upload(
+    client_addr,
+    filename,
+    filesize,
+    storage_dir,
+    logger,
+    protocol,
+    lock,
+    active_uploads,
+    key,
+):
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    """
+    El sistema operativo asigna automáticamente un puerto
+    con sock.bind(("0.0.0.0", 0)),
+    este puerto se recupera mediante sock.getsockname() para
+    luego mandarselo al cliente
+    """
+    sock.bind(("0.0.0.0", 0))
+    _, client_port = sock.getsockname()
+
+    with lock:
+        active_uploads[key] = client_port
+
+    sock.sendto(build_ack_with_port(0, client_port), client_addr)
+    logger.info(
+        f'Recibiendo "{filename}" ({filesize} bytes) '
+        f"en puerto {client_port} [{protocol=}]"
+    )
+
+    try:
+        _, transfer_receive = get_transfer_funcs(protocol)
+
+        filepath = os.path.join(storage_dir, filename)
+        transfer_receive(sock, filepath, filesize, first_seq=1, logger=logger)
+
+        logger.info(f'Upload "{filename} completado')
+
+    except Exception as e:
+        logger.error(f'Error en upload de "{filename}": {e}')
+
+    finally:
+        with lock:
+            active_uploads.pop(key, None)
+        sock.close()
+
+
+def handle_download(
+    client_addr,
+    filename,
+    storage_dir,
+    logger,
+    proto,
+    lock,
+    active_downloads,
+    key,
+):
+    transfer_send, _ = get_transfer_funcs(proto)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", 0))
+    _, client_port = sock.getsockname()
+
+    filepath = os.path.join(storage_dir, filename)
+
+    if not os.path.exists(filepath):
+        logger.error(f'Archivo no encontrado: "{filename}"')
+        sock.sendto(build_error("archivo no encontrado"), client_addr)
+        with lock:
+            active_downloads.pop(key, None)
+        sock.close()
+        return
+
+    filesize = os.path.getsize(filepath)
+
+    with lock:
+        active_downloads[key] = (client_port, filesize)
+
+    sock.sendto(
+        build_ack_with_port_and_size(0, client_port, filesize), client_addr
+    )
+
+    logger.info(
+        f'Enviando "{filename}" ({filesize} bytes) '
+        f"en puerto {client_port} [{proto=}]"
+    )
+
+    try:
+        with open(filepath, "rb") as f:
+            file_data = f.read()
+
+        transfer_send(sock, client_addr, file_data, first_seq=1, logger=logger)
+
+        logger.info(f'Download "{filename}" completado')
+
+    except Exception as e:
+        logger.error(f'Error en download de "{filename}": {e}')
+
+    finally:
+        with lock:
+            active_downloads.pop(key, None)
+        sock.close()
 
 
 def main():
@@ -154,6 +204,7 @@ def main():
     sock.bind((args.host, args.port))
 
     active_uploads = {}
+    active_downloads = {}
     lock = threading.Lock()
 
     while True:
@@ -171,43 +222,87 @@ def main():
             continue
 
         if packet["type"] == MSG_UPLOAD_REQ:
-            filename, filesize, proto = parse_upload_req(packet["payload"])
+            filename, filesize, protocol = parse_upload_req(packet["payload"])
 
-            key = (client_addr, filename, filesize, proto)
+            key = (client_addr, filename, filesize, protocol)
 
             with lock:
                 if key in active_uploads:
                     transfer_port = active_uploads[key]
-                    sock.sendto(build_ack_with_port(0, transfer_port), client_addr)
+                    sock.sendto(
+                        build_ack_with_port(0, transfer_port), client_addr
+                    )
 
                     logger.debug(
-                        f"UPLOAD duplicado de {client_addr} para '{filename}', "
+                        f"UPLOAD duplicado de {client_addr}"
+                        f"para '{filename}'"
                         f"reenviando puerto {transfer_port}"
                     )
                     continue
 
-            
             clientThread = threading.Thread(
                 target=handle_upload,
-                args=(client_addr, filename, filesize, args.storage, logger, proto, lock, active_uploads,key),
+                args=(
+                    client_addr,
+                    filename,
+                    filesize,
+                    args.storage,
+                    logger,
+                    protocol,
+                    lock,
+                    active_uploads,
+                    key,
+                ),
                 daemon=True,
             )
 
             clientThread.start()
 
         elif packet["type"] == MSG_DOWNLOAD_REQ:
-            filename, proto = parse_download_req(packet["payload"])
+            filename, protocol = parse_download_req(packet["payload"])
+
+            key = (client_addr, filename, protocol)
+
+            with lock:
+                if key in active_downloads:
+                    transfer_port, filesize = active_downloads[key]
+                    sock.sendto(
+                        build_ack_with_port_and_size(
+                            0, transfer_port, filesize
+                        ),
+                        client_addr,
+                    )
+                    logger.debug(
+                        f"DOWNLOAD duplicado de {client_addr}"
+                        f"para '{filename}', "
+                        f"reenviando puerto {transfer_port}"
+                    )
+                    continue
 
             clientThread = threading.Thread(
                 target=handle_download,
-                args=(client_addr, filename, args.storage, logger, proto),
+                args=(
+                    client_addr,
+                    filename,
+                    args.storage,
+                    logger,
+                    protocol,
+                    lock,
+                    active_downloads,
+                    key,
+                ),
                 daemon=True,
             )
             clientThread.start()
 
         else:
-            logger.error(f"Tipo de paquete no reconocido de {client_addr}: {packet['type_name']}")
-            sock.sendto(build_error("tipo de paquete no reconocido"), client_addr)
+            logger.error(
+                f"Tipo de paquete no reconocido de {client_addr}:"
+                f"{packet['type_name']}"
+            )
+            sock.sendto(
+                build_error("tipo de paquete no reconocido"), client_addr
+            )
 
 
 if __name__ == "__main__":

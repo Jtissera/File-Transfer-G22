@@ -2,7 +2,9 @@ import logging
 import sys
 
 
-def get_logger(name: str, verbose: bool = False, quiet: bool = False) -> logging.Logger:
+def get_logger(
+    name: str, verbose: bool = False, quiet: bool = False
+) -> logging.Logger:
     logger = logging.getLogger(name)
 
     if quiet:

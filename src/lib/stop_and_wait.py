@@ -11,34 +11,35 @@ Funcionamiento:
   3. Si recibe el ACK correcto, avanza al siguiente paquete (N+1)
   4. Si hay timeout, reenvía el mismo paquete (hasta max_retries veces)
   5. El receiver envía ACK al recibir cada DATA con el seq esperado
-  6. Si recibe un DATA duplicado (seq < esperado), reenvía el ACK correspondiente
-
-  Aclaracion:
-  El rtt solo se actualiza en caso de que no haya ocurrido una retransmicion ya que si
-  ocurre un timeout y se reenvia, cuando llegue el ACK no tengo ni idea de si le pertenece
-  al paquete original (solo tardo un poco mas) o si es del retransmitido => no sabes que sample_rtt
-  deberias pasarle.
+  6. Si recibe un DATA duplicado (seq < esperado),
+     reenvía el ACK correspondiente
 """
 
 import socket as _socket
 import time
 
-from rtt import *
+from rtt import (
+    rtt_update,
+    rtt_duplicate,
+    rtt_new,
+    rtt_timeout,
+)
 
 from protocol import (
     build_data,
     build_ack,
     parse_packet,
+)
+
+from constants import (
     MSG_DATA,
     MSG_ACK,
     MSG_ERROR,
     MAX_PAYLOAD_SIZE,
     MAX_PACKET_SIZE,
     DEFAULT_TIMEOUT,
-    MAX_RETRIES
+    MAX_RETRIES,
 )
-
-
 
 
 class TransferError(Exception):
@@ -47,18 +48,13 @@ class TransferError(Exception):
     pass
 
 
-
-# Sender
-
-
-
 def send(
     sock,
     addr,
     data,
     first_seq=0,
     logger=None,
-    initial_rtt = None,
+    initial_rtt=None,
     max_retries=MAX_RETRIES,
 ):
     """
@@ -73,11 +69,8 @@ def send(
         data: bytes a enviar
         first_seq: número de secuencia inicial (default 0)
         logger: logger (opcional)
-        timeout: segundos de espera por ACK antes de reenviar
+        initial_rtt: estimación inicial del round trip time
         max_retries: reintentos máximos por paquete
-
-    Returns:
-        int: siguiente número de secuencia disponible
 
     Raises:
         TransferError: si se superan los reintentos para algún paquete
@@ -86,7 +79,7 @@ def send(
     offset = 0
     seq = first_seq
 
-    if initial_rtt == None:
+    if initial_rtt is None:
         rtt = rtt_new()
     else:
         rtt = initial_rtt
@@ -105,34 +98,34 @@ def send(
                     f"Se superaron los {max_retries} reintentos para seq={seq}"
                 )
 
-            # Enviar paquete DATA
             sock.sendto(packet, addr)
-            send_time = time.time() # tiempo actual en seg
+            send_time = time.time()
             if logger:
                 logger.debug(
                     f"[S&W] Enviado DATA seq={seq} "
                     f"({offset + len(chunk)}/{total} bytes)"
                 )
 
-            # Esperar ACK
             try:
                 sock.settimeout(rtt_timeout(rtt_pkt))
-                raw, _recv_addr = sock.recvfrom(MAX_PACKET_SIZE)
+                raw, _ = sock.recvfrom(MAX_PACKET_SIZE)
                 pkt = parse_packet(raw)
 
                 if pkt["type"] == MSG_ACK and pkt["ack_number"] == seq:
                     ack_received = True
+
                     if retries == 0:
-                        rtt = rtt_update(rtt, time.time() - send_time) # La resta es a lo que refiere la aclaracion del incio
+                        rtt = rtt_update(rtt, time.time() - send_time)
                     if logger:
                         logger.debug(f"[S&W] Recibido ACK ack={seq}")
 
                 elif pkt["type"] == MSG_ERROR:
-                    error_msg = pkt["payload"].decode("utf-8", errors="replace")
+                    error_msg = pkt["payload"].decode(
+                        "utf-8", errors="replace"
+                    )
                     raise TransferError(f"Error del receptor: {error_msg}")
 
                 else:
-                    # ACK de otro seq o paquete inesperado, ignorar y reintentar
                     if logger:
                         logger.debug(
                             f"[S&W] Paquete inesperado: "
@@ -164,17 +157,12 @@ def send(
     return seq
 
 
-
-# Receiver
-
-
-
 def receive(
     sock,
+    filepath,
     expected_bytes,
     first_seq=0,
     logger=None,
-    max_retries=MAX_RETRIES,
 ):
     """
     Recibe datos de forma confiable usando Stop & Wait.
@@ -184,14 +172,10 @@ def receive(
 
     Args:
         sock:           socket UDP ya creado
+        filepath:       ruta del archivo a escribir
         expected_bytes: cantidad total de bytes esperados
         first_seq:      número de secuencia inicial esperado (default 0)
         logger:         logger (opcional)
-        timeout:        segundos de espera por cada DATA
-        max_retries:    máximo de timeouts consecutivos sin recibir datos
-
-    Returns:
-        tuple: (data: bytes, sender_addr: tuple)
 
     Raises:
         TransferError: si hay demasiados timeouts consecutivos
@@ -199,13 +183,16 @@ def receive(
     data = bytearray()
     expected_seq = first_seq
     sender_addr = None
+    last_ack_sent = first_seq - 1
+    sock.settimeout(None)
+
+    with open(filepath, "xb") as f:
+        if logger:
+            logger.debug(f"[GBN] Se creo el archivo en {filepath}")
 
     while len(data) < expected_bytes:
-
         raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
 
-
-        # Validar integridad del paquete
         try:
             pkt = parse_packet(raw)
         except ValueError as e:
@@ -213,32 +200,37 @@ def receive(
                 logger.debug(f"[S&W] Paquete corrupto descartado: {e}")
             continue
 
-        # Filtrar por sender (una vez establecido)
         if sender_addr is not None and addr != sender_addr:
             if logger:
-                logger.debug(f"[S&W] Paquete de {addr} ignorado (esperaba {sender_addr})")
+                logger.debug(
+                    f"[S&W] Paquete de {addr} ignorado"
+                    f" (esperaba {sender_addr})"
+                )
             continue
 
-        # Manejar paquete de error
         if pkt["type"] == MSG_ERROR:
             error_msg = pkt["payload"].decode("utf-8", errors="replace")
             raise TransferError(f"Error del emisor: {error_msg}")
 
-        # Ignorar paquetes que no sean DATA
         if pkt["type"] != MSG_DATA:
             if logger:
-                logger.debug(f"[S&W] Esperaba DATA, recibido {pkt['type_name']}")
+                logger.debug(
+                    f"[S&W] Esperaba DATA, recibido {pkt['type_name']}"
+                )
             continue
 
-        # Registrar dirección del sender con el primer DATA recibido
         if sender_addr is None:
             sender_addr = addr
 
         if pkt["seq_number"] == expected_seq:
-            # Paquete esperado: guardar datos y enviar ACK
             data.extend(pkt["payload"])
+
+            with open(filepath, "ab") as f:
+                f.write(pkt["payload"])
+
             ack = build_ack(expected_seq)
             sock.sendto(ack, addr)
+            last_ack_sent = expected_seq
 
             if logger:
                 logger.debug(
@@ -248,7 +240,6 @@ def receive(
             expected_seq += 1
 
         elif pkt["seq_number"] < expected_seq:
-            # Duplicado: reenviar el ACK para que el sender avance
             ack = build_ack(pkt["seq_number"])
             sock.sendto(ack, addr)
             if logger:
@@ -267,5 +258,38 @@ def receive(
 
     if logger:
         logger.info(f"[S&W] Recepción completada: {len(data)} bytes recibidos")
+
+    final_ack_retries = MAX_RETRIES
+
+    while (
+        final_ack_retries > 0
+        and sender_addr is not None
+        and last_ack_sent >= first_seq
+    ):
+        try:
+            sock.settimeout(DEFAULT_TIMEOUT)
+            raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
+
+            if addr != sender_addr:
+                continue
+
+            try:
+                pkt = parse_packet(raw)
+            except ValueError:
+                continue
+
+            if pkt["type"] == MSG_DATA:
+                ack = build_ack(last_ack_sent)
+                sock.sendto(ack, addr)
+
+                if logger:
+                    logger.debug(
+                        f"[GBN] Linger: duplicado/fuera de orden "
+                        f"seq={pkt['seq_number']}, "
+                        f"reenviado ACK={last_ack_sent}"
+                    )
+
+        except _socket.timeout:
+            final_ack_retries -= 1
 
     return bytes(data), sender_addr
