@@ -106,6 +106,18 @@ def handle_upload(
     sock.bind(("0.0.0.0", 0))
     _, client_port = sock.getsockname()
 
+    filepath = os.path.join(storage_dir, filename)
+
+    if os.path.exists(filepath):
+        logger.error(f'Upload rechazado: "{filename}" ya existe en storage')
+        sock.sendto(
+            build_error(f'el archivo "{filename}" ya existe'), client_addr
+        )
+        sock.close()
+        with lock:
+            active_uploads.pop(key, None)
+        return
+
     with lock:
         active_uploads[key] = client_port
 
@@ -118,7 +130,6 @@ def handle_upload(
     try:
         _, transfer_receive = get_transfer_funcs(protocol)
 
-        filepath = os.path.join(storage_dir, filename)
         transfer_receive(sock, filepath, filesize, first_seq=1, logger=logger)
 
         logger.info(f'Upload "{filename} completado')

@@ -111,6 +111,14 @@ def main():
         logger.error(f'Archivo no encontrado: "{args.src}"')
         return
 
+    if not os.path.isfile(args.src):
+        logger.error(f'"{args.src}" no es un archivo')
+        return
+
+    if os.path.getsize(args.src) == 0:
+        logger.error(f'El archivo "{args.src}" está vacío')
+        return
+
     filesize = os.path.getsize(args.src)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

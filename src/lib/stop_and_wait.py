@@ -184,9 +184,18 @@ def receive(
     last_ack_sent = first_seq - 1
     sock.settimeout(None)
 
-    with open(filepath, "xb") as f:
-        if logger:
-            logger.debug(f"[GBN] Se creo el archivo en {filepath}")
+    try:
+        with open(filepath, "xb") as f:
+            if logger:
+                logger.debug(f"[S&W] Se creo el archivo en {filepath}")
+
+    except FileExistsError:
+        raise TransferError(f'[S&W] El archivo "{filepath}" ya existe')
+
+    except OSError as e:
+        raise TransferError(
+            f'[S&W] No se pudo crear el archivo "{filepath}": {e}'
+        )
 
     while bytes_received < expected_bytes:
         raw, addr = sock.recvfrom(MAX_PACKET_SIZE)

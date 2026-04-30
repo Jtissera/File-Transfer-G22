@@ -168,6 +168,13 @@ def main():
 
     filepath = os.path.join(args.dst, args.name)
 
+    os.makedirs(args.dst, exist_ok=True)
+
+    if os.path.exists(filepath):
+        logger.error(f'El archivo "{filepath}" ya existe en el destino')
+        sock.close()
+        return
+
     try:
         protocol.receive(sock, filepath, filesize, first_seq=1, logger=logger)
     except protocol.TransferError as e:
