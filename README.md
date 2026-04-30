@@ -33,7 +33,9 @@ FILE-TRANSFER-G22/
 │ │ ├── go_back_n.py
 │ │ ├── stop_and_wait.py
 │ │ ├── protocol.py
-│ │ └── logger.py
+│ │ ├── logger.py
+│ │ ├── rtt.py
+│ │ └── constants.py
 │ ├── storage/
 │ ├── upload
 │ ├── download
@@ -121,8 +123,8 @@ h2 python3 upload -H 10.0.0.1 -p 9000 -s archivo.txt -n archivo.txt -r gbn
 
 Se realizaron pruebas con:
 
-- Archivos de 100 KB, 1 MB y 5 MB  
-- Pérdida de paquetes de 0% y 10%  
+- Archivos de 100 KB, 1 MB, 5 MB y 10MB
+- Pérdida de paquetes de 0% y 15%  
 - Comparación entre Stop & Wait y Go-Back-N  
 
 ---
@@ -132,10 +134,9 @@ Se realizaron pruebas con:
 El sistema contempla:
 
 - Pérdida de paquetes  
-- Timeouts y retransmisiones  
+- Reordenamiento de paquetes 
 - Paquetes corruptos  
 - Archivo inexistente  
-- Mensajes de error del servidor  
 
 ---
 

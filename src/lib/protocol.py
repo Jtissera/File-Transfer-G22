@@ -106,7 +106,6 @@ def parse_packet(raw: bytes) -> dict:
             f"Encabezado: {payload_len} bytes, obtenido: {len(payload)}"
         )
 
-    # Recompute checksum with the field zeroed out
     header_for_check = struct.pack(
         HEADER_FORMAT, msg_type, 0, 0, seq_number, ack_number, payload_len, 0
     )

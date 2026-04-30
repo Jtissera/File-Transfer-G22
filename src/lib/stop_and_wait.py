@@ -154,8 +154,6 @@ def send(
     if logger:
         logger.info(f"[S&W] Transferencia completada: {total} bytes enviados")
 
-    return seq
-
 
 def receive(
     sock,
@@ -180,7 +178,7 @@ def receive(
     Raises:
         TransferError: si hay demasiados timeouts consecutivos
     """
-    data = bytearray()
+    bytes_received = 0
     expected_seq = first_seq
     sender_addr = None
     last_ack_sent = first_seq - 1
@@ -190,7 +188,7 @@ def receive(
         if logger:
             logger.debug(f"[GBN] Se creo el archivo en {filepath}")
 
-    while len(data) < expected_bytes:
+    while bytes_received < expected_bytes:
         raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
 
         try:
@@ -223,11 +221,11 @@ def receive(
             sender_addr = addr
 
         if pkt["seq_number"] == expected_seq:
-            data.extend(pkt["payload"])
 
             with open(filepath, "ab") as f:
                 f.write(pkt["payload"])
 
+            bytes_received += len(pkt["payload"])
             ack = build_ack(expected_seq)
             sock.sendto(ack, addr)
             last_ack_sent = expected_seq
@@ -235,7 +233,7 @@ def receive(
             if logger:
                 logger.debug(
                     f"[S&W] Recibido DATA seq={expected_seq} "
-                    f"({len(data)}/{expected_bytes} bytes), ACK enviado"
+                    f"({bytes_received}/{expected_bytes} bytes), ACK enviado"
                 )
             expected_seq += 1
 
@@ -250,6 +248,11 @@ def receive(
 
         else:
             # Paquete futuro (no debería ocurrir)
+
+            if last_ack_sent >= first_seq:
+                ack = build_ack(last_ack_sent)
+                sock.sendto(ack, addr)
+
             if logger:
                 logger.debug(
                     f"[S&W] seq={pkt['seq_number']} fuera de orden, "
@@ -257,7 +260,9 @@ def receive(
                 )
 
     if logger:
-        logger.info(f"[S&W] Recepción completada: {len(data)} bytes recibidos")
+        logger.info(
+            f"[S&W] Recepción completada: {bytes_received} bytes recibidos"
+        )
 
     final_ack_retries = MAX_RETRIES
 
@@ -291,5 +296,3 @@ def receive(
 
         except _socket.timeout:
             final_ack_retries -= 1
-
-    return bytes(data), sender_addr

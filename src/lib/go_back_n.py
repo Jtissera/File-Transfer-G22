@@ -243,7 +243,7 @@ def receive(
     Acepta únicamente el siguiente número de secuencia esperado. Cuando llega
     un paquete fuera de orden, lo descarta y reenvía el último ACK válido.
     """
-    data = bytearray()
+    bytes_received = 0
     expected_seq = first_seq
     sender_addr = None
     last_ack_sent = first_seq - 1
@@ -253,7 +253,7 @@ def receive(
         if logger:
             logger.debug(f"[GBN] Se creo el archivo en {filepath}")
 
-    while len(data) < expected_bytes:
+    while bytes_received < expected_bytes:
 
         raw, addr = sock.recvfrom(MAX_PACKET_SIZE)
 
@@ -289,13 +289,13 @@ def receive(
         seq = pkt["seq_number"]
 
         if seq == expected_seq:
-            remaining = expected_bytes - len(data)
+            remaining = expected_bytes - bytes_received
             payload = pkt["payload"][:remaining]
-            data.extend(payload)
 
             with open(filepath, "ab") as f:
-                f.write(pkt["payload"])
+                f.write(payload)
 
+            bytes_received += len(payload)
             ack = build_ack(seq)
             sock.sendto(ack, addr)
             last_ack_sent = seq
@@ -303,7 +303,7 @@ def receive(
             if logger:
                 logger.debug(
                     f"[GBN] Recibido DATA seq={seq} "
-                    f"({len(data)}/{expected_bytes} bytes),"
+                    f"({bytes_received}/{expected_bytes} bytes),"
                     f"ACK acumulativo enviado"
                 )
 
@@ -328,7 +328,9 @@ def receive(
                     )
 
     if logger:
-        logger.info(f"[GBN] Recepción completada: {len(data)} bytes recibidos")
+        logger.info(
+            f"[GBN] Recepción completada: {bytes_received} bytes recibidos"
+        )
 
     final_ack_retries = MAX_RETRIES
 
